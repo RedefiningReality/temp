@@ -3,7 +3,7 @@
 # Compatible with VyOS 1.4+ / rolling (2026)
 #
 # Usage:
-#   firewall.sh --iface IFACE [--inbound MODE] [--csv FILE] [--outbound MODE]
+#   vbash firewall.sh --iface IFACE [--inbound MODE] [--csv FILE] [--outbound MODE]
 #
 # --iface    Interface to apply rules to (required)
 #
@@ -25,10 +25,9 @@
 #   600-620  - outbound allow rules
 #   900      - outbound default drop / block
 
-# Snapshot args before source clobbers $@
-ARGS=("$@")
+# Snapshot args BEFORE source clobbers positional params
+ARGS="$@"
 source /opt/vyatta/etc/functions/script-template
-set -- "${ARGS[@]}"
 
 # Defaults
 IFACE=""
@@ -41,15 +40,20 @@ IN_DROP=500
 OUT_BASE=600
 OUT_DROP=900
 
-# Arg parsing
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --iface)     IFACE="$2";         shift 2 ;;
-    --inbound)   INBOUND_MODE="$2";  shift 2 ;;
-    --outbound)  OUTBOUND_MODE="$2"; shift 2 ;;
-    --csv)       CSV_FILE="$2";      shift 2 ;;
-    *)           echo "ERROR: Unknown arg '$1'" >&2; exit 1 ;;
+# Arg parsing from $ARGS since $@ is clobbered by script-template
+prev=""
+for token in $ARGS; do
+  case "$prev" in
+    --iface)     IFACE="$token" ;;
+    --inbound)   INBOUND_MODE="$token" ;;
+    --outbound)  OUTBOUND_MODE="$token" ;;
+    --csv)       CSV_FILE="$token" ;;
   esac
+  case "$token" in
+    --iface|--inbound|--outbound|--csv) ;;
+    --*) echo "ERROR: Unknown arg '$token'" >&2; exit 1 ;;
+  esac
+  prev="$token"
 done
 
 # Validation
