@@ -18,17 +18,17 @@
 #
 # At least one of --inbound or --outbound must be provided.
 #
-# NOTE: Rules are added to firewall ipv4 forward filter.
-#       Inbound rules match traffic arriving on --iface.
-#       Outbound rules match traffic leaving on --iface.
-#       Rule number ranges:
-#         1        - established/related (shared)
-#         100-499  - inbound whitelist rules
-#         500      - inbound default drop
-#         600-899  - outbound allow rules
-#         900      - outbound default drop
+# Rule number ranges:
+#   1        - established/related (shared)
+#   100-490  - inbound whitelist rules
+#   500      - inbound default drop
+#   600-620  - outbound allow rules
+#   900      - outbound default drop / block
 
+# Snapshot args before source clobbers $@
+ARGS=("$@")
 source /opt/vyatta/etc/functions/script-template
+set -- "${ARGS[@]}"
 
 # Defaults
 IFACE=""
@@ -36,7 +36,6 @@ INBOUND_MODE=""
 OUTBOUND_MODE=""
 CSV_FILE=""
 
-# Rule number ranges
 IN_BASE=100
 IN_DROP=500
 OUT_BASE=600
@@ -79,7 +78,6 @@ fi
 # HELPERS
 # ==============================================================
 
-# Ensure rule 1 exists for established/related (shared, safe to re-set)
 ensure_established() {
   set firewall ipv4 forward filter rule 1 action accept
   set firewall ipv4 forward filter rule 1 description 'Allow established/related'
@@ -87,13 +85,9 @@ ensure_established() {
   set firewall ipv4 forward filter rule 1 state related
 }
 
-# Delete all rules in a number range on a given interface direction
-# Usage: delete_rules_in_range START END inbound-interface|outbound-interface IFACE
 delete_rules_in_range() {
   local START=$1
   local END=$2
-  local DIR=$3
-  local IF=$4
   local N=$START
   while [[ $N -le $END ]]; do
     delete firewall ipv4 forward filter rule $N 2>/dev/null
@@ -107,14 +101,12 @@ delete_rules_in_range() {
 
 fn_inbound_off() {
   echo "[inbound] Removing inbound rules for $IFACE..."
-  delete_rules_in_range $IN_BASE $IN_DROP inbound-interface $IFACE
+  delete_rules_in_range $IN_BASE $IN_DROP
 }
 
 fn_inbound_whitelist() {
   echo "[inbound] Applying whitelist from $CSV_FILE on $IFACE..."
-
-  # Clear existing inbound rules for this interface
-  delete_rules_in_range $IN_BASE $IN_DROP inbound-interface $IFACE
+  delete_rules_in_range $IN_BASE $IN_DROP
 
   ensure_established
 
@@ -136,7 +128,6 @@ fn_inbound_whitelist() {
     RULE_NUM=$(( RULE_NUM + 10 ))
   done < "$CSV_FILE"
 
-  # Default drop for unmatched inbound on this interface
   echo "  + Rule $IN_DROP: default drop inbound $IFACE"
   set firewall ipv4 forward filter rule $IN_DROP action drop
   set firewall ipv4 forward filter rule $IN_DROP description "Default drop inbound $IFACE"
@@ -145,38 +136,33 @@ fn_inbound_whitelist() {
 
 fn_outbound_off() {
   echo "[outbound] Removing outbound rules for $IFACE..."
-  delete_rules_in_range $OUT_BASE $OUT_DROP outbound-interface $IFACE
+  delete_rules_in_range $OUT_BASE $OUT_DROP
 }
 
 fn_outbound_allow() {
   echo "[outbound] Allowing TCP/80,443 + UDP/53 on $IFACE, dropping rest..."
-
-  delete_rules_in_range $OUT_BASE $OUT_DROP outbound-interface $IFACE
+  delete_rules_in_range $OUT_BASE $OUT_DROP
 
   ensure_established
 
-  # Allow HTTP
   set firewall ipv4 forward filter rule $OUT_BASE action accept
   set firewall ipv4 forward filter rule $OUT_BASE description 'Allow HTTP'
   set firewall ipv4 forward filter rule $OUT_BASE outbound-interface name $IFACE
   set firewall ipv4 forward filter rule $OUT_BASE protocol tcp
   set firewall ipv4 forward filter rule $OUT_BASE destination port 80
 
-  # Allow HTTPS
   set firewall ipv4 forward filter rule $(( OUT_BASE + 10 )) action accept
   set firewall ipv4 forward filter rule $(( OUT_BASE + 10 )) description 'Allow HTTPS'
   set firewall ipv4 forward filter rule $(( OUT_BASE + 10 )) outbound-interface name $IFACE
   set firewall ipv4 forward filter rule $(( OUT_BASE + 10 )) protocol tcp
   set firewall ipv4 forward filter rule $(( OUT_BASE + 10 )) destination port 443
 
-  # Allow DNS
   set firewall ipv4 forward filter rule $(( OUT_BASE + 20 )) action accept
   set firewall ipv4 forward filter rule $(( OUT_BASE + 20 )) description 'Allow DNS'
   set firewall ipv4 forward filter rule $(( OUT_BASE + 20 )) outbound-interface name $IFACE
   set firewall ipv4 forward filter rule $(( OUT_BASE + 20 )) protocol udp
   set firewall ipv4 forward filter rule $(( OUT_BASE + 20 )) destination port 53
 
-  # Default drop
   echo "  + Rule $OUT_DROP: default drop outbound $IFACE"
   set firewall ipv4 forward filter rule $OUT_DROP action drop
   set firewall ipv4 forward filter rule $OUT_DROP description "Default drop outbound $IFACE"
@@ -185,8 +171,7 @@ fn_outbound_allow() {
 
 fn_outbound_block() {
   echo "[outbound] Blocking ALL outbound on $IFACE..."
-
-  delete_rules_in_range $OUT_BASE $OUT_DROP outbound-interface $IFACE
+  delete_rules_in_range $OUT_BASE $OUT_DROP
 
   set firewall ipv4 forward filter rule $OUT_DROP action drop
   set firewall ipv4 forward filter rule $OUT_DROP description "Block all outbound $IFACE"
