@@ -3,7 +3,7 @@
 # Compatible with VyOS 1.4+ / rolling (2026)
 #
 # Usage:
-#   vbash firewall.sh --iface IFACE [--inbound MODE] [--csv FILE] [--outbound MODE]
+#   vbash firewall.sh --iface IFACE [--inbound MODE] [--csv FILE] [--outbound MODE] [--input MODE]
 #
 # --iface    Interface to apply rules to (required)
 #
@@ -14,16 +14,23 @@
 #            allow        Allow TCP/80,443 + UDP/53, drop rest
 #            block        Drop all outbound (no exceptions)
 #
+# --input    off          Remove input rules for this interface
+#            block        Block all traffic from this interface to the router
+#
 # --csv      Path to CSV file (required when --inbound whitelist)
 #
-# At least one of --inbound or --outbound must be provided.
+# At least one of --inbound, --outbound, or --input must be provided.
 #
-# Rule number ranges:
+# Rule number ranges (forward filter):
 #   1        - established/related (shared)
 #   100-490  - inbound whitelist rules
 #   500      - inbound default drop
 #   600-620  - outbound allow rules
 #   900      - outbound default drop / block
+#
+# Rule number ranges (input filter):
+#   1        - established/related (shared)
+#   10       - block input from interface
 
 # Snapshot args BEFORE source clobbers positional params
 ARGS="$@"
@@ -33,6 +40,7 @@ source /opt/vyatta/etc/functions/script-template
 IFACE=""
 INBOUND_MODE=""
 OUTBOUND_MODE=""
+INPUT_MODE=""
 CSV_FILE=""
 
 IN_BASE=100
@@ -47,10 +55,11 @@ for token in $ARGS; do
     --iface)     IFACE="$token" ;;
     --inbound)   INBOUND_MODE="$token" ;;
     --outbound)  OUTBOUND_MODE="$token" ;;
+    --input)     INPUT_MODE="$token" ;;
     --csv)       CSV_FILE="$token" ;;
   esac
   case "$token" in
-    --iface|--inbound|--outbound|--csv) ;;
+    --iface|--inbound|--outbound|--input|--csv) ;;
     --*) echo "ERROR: Unknown arg '$token'" >&2; exit 1 ;;
   esac
   prev="$token"
@@ -60,8 +69,8 @@ done
 if [[ -z "$IFACE" ]]; then
   echo "ERROR: --iface is required" >&2; exit 1
 fi
-if [[ -z "$INBOUND_MODE" && -z "$OUTBOUND_MODE" ]]; then
-  echo "ERROR: provide at least --inbound or --outbound" >&2; exit 1
+if [[ -z "$INBOUND_MODE" && -z "$OUTBOUND_MODE" && -z "$INPUT_MODE" ]]; then
+  echo "ERROR: provide at least --inbound, --outbound, or --input" >&2; exit 1
 fi
 if [[ "$INBOUND_MODE" == "whitelist" && -z "$CSV_FILE" ]]; then
   echo "ERROR: --inbound whitelist requires --csv FILE" >&2; exit 1
@@ -77,24 +86,45 @@ if [[ -n "$OUTBOUND_MODE" ]] && \
    [[ "$OUTBOUND_MODE" != "off" && "$OUTBOUND_MODE" != "allow" && "$OUTBOUND_MODE" != "block" ]]; then
   echo "ERROR: --outbound must be 'off', 'allow', or 'block'" >&2; exit 1
 fi
+if [[ -n "$INPUT_MODE" ]] && \
+   [[ "$INPUT_MODE" != "off" && "$INPUT_MODE" != "block" ]]; then
+  echo "ERROR: --input must be 'off' or 'block'" >&2; exit 1
+fi
 
 # ==============================================================
 # HELPERS
 # ==============================================================
 
-ensure_established() {
+ensure_forward_established() {
   set firewall ipv4 forward filter rule 1 action accept
   set firewall ipv4 forward filter rule 1 description 'Allow established/related'
   set firewall ipv4 forward filter rule 1 state established
   set firewall ipv4 forward filter rule 1 state related
 }
 
-delete_rules_in_range() {
+ensure_input_established() {
+  set firewall ipv4 input filter rule 1 action accept
+  set firewall ipv4 input filter rule 1 description 'Allow established/related'
+  set firewall ipv4 input filter rule 1 state established
+  set firewall ipv4 input filter rule 1 state related
+}
+
+delete_forward_rules_in_range() {
   local START=$1
   local END=$2
   local N=$START
   while [[ $N -le $END ]]; do
-    delete firewall ipv4 forward filter rule $N 2>/dev/null
+    delete firewall ipv4 forward filter rule $N 2>/dev/null || true
+    N=$(( N + 10 ))
+  done
+}
+
+delete_input_rules_in_range() {
+  local START=$1
+  local END=$2
+  local N=$START
+  while [[ $N -le $END ]]; do
+    delete firewall ipv4 input filter rule $N 2>/dev/null || true
     N=$(( N + 10 ))
   done
 }
@@ -105,14 +135,14 @@ delete_rules_in_range() {
 
 fn_inbound_off() {
   echo "[inbound] Removing inbound rules for $IFACE..."
-  delete_rules_in_range $IN_BASE $IN_DROP
+  delete_forward_rules_in_range $IN_BASE $IN_DROP
 }
 
 fn_inbound_whitelist() {
   echo "[inbound] Applying whitelist from $CSV_FILE on $IFACE..."
-  delete_rules_in_range $IN_BASE $IN_DROP
+  delete_forward_rules_in_range $IN_BASE $IN_DROP
 
-  ensure_established
+  ensure_forward_established
 
   RULE_NUM=$IN_BASE
   while IFS=, read -r IP PORT || [[ -n "$IP" ]]; do
@@ -140,14 +170,14 @@ fn_inbound_whitelist() {
 
 fn_outbound_off() {
   echo "[outbound] Removing outbound rules for $IFACE..."
-  delete_rules_in_range $OUT_BASE $OUT_DROP
+  delete_forward_rules_in_range $OUT_BASE $OUT_DROP
 }
 
 fn_outbound_allow() {
   echo "[outbound] Allowing TCP/80,443 + UDP/53 on $IFACE, dropping rest..."
-  delete_rules_in_range $OUT_BASE $OUT_DROP
+  delete_forward_rules_in_range $OUT_BASE $OUT_DROP
 
-  ensure_established
+  ensure_forward_established
 
   set firewall ipv4 forward filter rule $OUT_BASE action accept
   set firewall ipv4 forward filter rule $OUT_BASE description 'Allow HTTP'
@@ -175,11 +205,27 @@ fn_outbound_allow() {
 
 fn_outbound_block() {
   echo "[outbound] Blocking ALL outbound on $IFACE..."
-  delete_rules_in_range $OUT_BASE $OUT_DROP
+  delete_forward_rules_in_range $OUT_BASE $OUT_DROP
 
   set firewall ipv4 forward filter rule $OUT_DROP action drop
   set firewall ipv4 forward filter rule $OUT_DROP description "Block all outbound $IFACE"
   set firewall ipv4 forward filter rule $OUT_DROP outbound-interface name $IFACE
+}
+
+fn_input_off() {
+  echo "[input] Removing input rules for $IFACE..."
+  delete_input_rules_in_range 10 10
+}
+
+fn_input_block() {
+  echo "[input] Blocking all input from $IFACE to router..."
+  delete_input_rules_in_range 10 10
+
+  ensure_input_established
+
+  set firewall ipv4 input filter rule 10 action drop
+  set firewall ipv4 input filter rule 10 description "Block input from $IFACE to router"
+  set firewall ipv4 input filter rule 10 inbound-interface name $IFACE
 }
 
 # ==============================================================
@@ -197,6 +243,11 @@ case "$OUTBOUND_MODE" in
   off)   fn_outbound_off ;;
   allow) fn_outbound_allow ;;
   block) fn_outbound_block ;;
+esac
+
+case "$INPUT_MODE" in
+  off)   fn_input_off ;;
+  block) fn_input_block ;;
 esac
 
 commit || { echo "ERROR: commit failed - rolling back" >&2; discard; exit 1; }
