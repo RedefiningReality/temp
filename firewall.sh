@@ -30,7 +30,8 @@
 #
 # Rule number ranges (input filter):
 #   1        - established/related (shared)
-#   10       - block input from interface
+#   10+      - per-interface block rules (derived from interface number)
+#              e.g. eth0=10, eth1=20, eth2=30
 
 # Snapshot args BEFORE source clobbers positional params
 ARGS="$@"
@@ -91,6 +92,30 @@ if [[ -n "$INPUT_MODE" ]] && \
   echo "ERROR: --input must be 'off' or 'block'" >&2; exit 1
 fi
 
+# Derive a unique input rule number from the interface name.
+# Extracts the trailing number from the interface name (eth0=10, eth1=20, eth2=30).
+# Falls back to a hash-like value for non-standard names (e.g. enp3s0).
+get_input_rule_num() {
+  local iface=$1
+  local ifnum
+  ifnum=$(echo "$iface" | grep -o '[0-9]*$')
+  if [[ -n "$ifnum" ]]; then
+    echo $(( (ifnum + 1) * 10 ))
+  else
+    # Non-numeric suffix: sum the ASCII values of the name mod 89 + 10
+    # Gives a stable number in range 10-98 for any interface name
+    local sum=0
+    local char
+    for (( i=0; i<${#iface}; i++ )); do
+      char="${iface:$i:1}"
+      sum=$(( sum + $(printf '%d' "'$char") ))
+    done
+    echo $(( (sum % 89) + 10 ))
+  fi
+}
+
+INPUT_RULE_NUM=$(get_input_rule_num "$IFACE")
+
 # ==============================================================
 # HELPERS
 # ==============================================================
@@ -115,16 +140,6 @@ delete_forward_rules_in_range() {
   local N=$START
   while [[ $N -le $END ]]; do
     delete firewall ipv4 forward filter rule $N 2>/dev/null || true
-    N=$(( N + 10 ))
-  done
-}
-
-delete_input_rules_in_range() {
-  local START=$1
-  local END=$2
-  local N=$START
-  while [[ $N -le $END ]]; do
-    delete firewall ipv4 input filter rule $N 2>/dev/null || true
     N=$(( N + 10 ))
   done
 }
@@ -213,19 +228,19 @@ fn_outbound_block() {
 }
 
 fn_input_off() {
-  echo "[input] Removing input rules for $IFACE..."
-  delete_input_rules_in_range 10 10
+  echo "[input] Removing input rule $INPUT_RULE_NUM for $IFACE..."
+  delete firewall ipv4 input filter rule $INPUT_RULE_NUM 2>/dev/null || true
 }
 
 fn_input_block() {
-  echo "[input] Blocking all input from $IFACE to router..."
-  delete_input_rules_in_range 10 10
+  echo "[input] Blocking all input from $IFACE to router (rule $INPUT_RULE_NUM)..."
+  delete firewall ipv4 input filter rule $INPUT_RULE_NUM 2>/dev/null || true
 
   ensure_input_established
 
-  set firewall ipv4 input filter rule 10 action drop
-  set firewall ipv4 input filter rule 10 description "Block input from $IFACE to router"
-  set firewall ipv4 input filter rule 10 inbound-interface name $IFACE
+  set firewall ipv4 input filter rule $INPUT_RULE_NUM action drop
+  set firewall ipv4 input filter rule $INPUT_RULE_NUM description "Block input from $IFACE to router"
+  set firewall ipv4 input filter rule $INPUT_RULE_NUM inbound-interface name $IFACE
 }
 
 # ==============================================================
